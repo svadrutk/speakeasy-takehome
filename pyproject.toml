@@ -1,0 +1,28 @@
+[project]
+name = "speakeasy"
+version = "0.1.0"
+description = "Kalshi World Cup prediction-market sentiment as developer-consumable JSON"
+requires-python = ">=3.13"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "httpx>=0.27",
+    "python-dotenv>=1.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "ruff>=0.6",
+    "ty>=0.0.1a1",
+]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+# Default rule set is fine for this scope
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
