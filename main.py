@@ -15,7 +15,6 @@ from __future__ import annotations
 import asyncio
 import math
 import re
-import subprocess
 import time
 from contextlib import asynccontextmanager
 from datetime import date
@@ -25,18 +24,19 @@ import httpx
 from fastapi import FastAPI, HTTPException
 
 from config import (
-    CACHE_TTL_SECONDS,
-    COOLDOWN_SECONDS,
-    DEFAULT_THRESHOLD,
     KALSHI_BASE_URL,
     LLM_MODEL,
     OPENROUTER_API_KEY,
     TEAMS,
-    WATCH_TEAMS,
-    INTER_TEAM_DELAY_SECONDS,
     get_team,
 )
 from models import TeamSentiment
+from watcher.core import (
+    _get_cached_or_fetch,
+    _record_sample,
+    _rolling,
+    _watcher_loop,
+)
 
 # --- HTTP plumbing ----------------------------------------------------------
 
@@ -607,174 +607,25 @@ def template_narrative(data: dict) -> str:
 # compute_delta (D12) -- cold-start None until the process has >=1m of samples
 # for that team. The on-demand endpoint populates the window as a side effect,
 # so repeated calls for the same team eventually yield a non-None delta_1m.
-# The watcher (Component 8, below) is the PRIMARY window-filler; without it,
-# sporadic curls can't accumulate 1m of span (any gap >60s resets to span=0).
+# The watcher (Component 8, in watcher/core.py) is the PRIMARY window-filler;
+# without it, sporadic curls can't accumulate 1m of span (any gap >60s resets
+# to span=0).
 
 _watcher_task: asyncio.Task | None = None
-
-
-# --- Notification gate (Component 9) ----------------------------------------
-# Pure function: decides WHEN to notify. Deterministic, unit-testable without
-# an LLM (D5). The LLM decides WHAT to say (D29); this decides whether to say
-# anything at all.
-#
-# Inputs are integer basis points (D27 -- no float arithmetic in the pipeline).
-# 5% = 500 bp. The threshold stays a float (0.20); the comparison is
-# `abs(cur - prev) >= thr * prev` -- int on the LHS, one float multiply on the
-# RHS. Not drift-prone like money subtraction. Using `>=` instead of division
-# avoids a div-by-zero and is more numerically robust than `abs(delta)/prev`.
-#
-# prev=0 (a real 0% reading, e.g. an eliminated team): any nonzero move from
-# zero is a qualitative shift -> True. prev=0, cur=0 -> False. Rejected
-# absolute-delta-fallback (a magic number to defend) and treat-as-cold-start
-# (0%->50% would never notify).
-
-
-def should_notify(
-    current_bp: int | None,
-    previous_bp: int | None,
-    threshold: float = DEFAULT_THRESHOLD,
-) -> bool:
-    """Return True if the relative probability delta warrants a notification.
-
-    Relative delta = abs(current - previous) / previous >= threshold (D5).
-    None inputs (cold start / data blip) -> False. previous == 0: True if
-    current > 0 (qualitative shift from zero), False if current == 0.
-    """
-    if current_bp is None or previous_bp is None:
-        return False
-    if previous_bp == 0:
-        return current_bp > 0
-    return abs(current_bp - previous_bp) >= threshold * previous_bp
-
-
-# --- macOS notifications (Component 10) -------------------------------------
-# One osascript subprocess call. Wrapped in try/except so a notification
-# failure (headless server, Do Not Disturb, osascript missing) NEVER crashes
-# the watcher (D17 spirit: the watcher is non-load-bearing; a notify failure
-# must not take down the window-filler). Rejected pync/node-notifier (a
-# dependency for one line; harder to explain than "subprocess to osascript").
-#
-# Another week: a Slack/webhook transport behind the same interface -- the
-# signature is the only thing a second transport has to satisfy.
-
-_NOTIF_TITLE_PREFIX = "Kalshi"
-
-
-def send_notification(title: str, message: str) -> None:
-    """Fire a macOS notification via osascript. Never raises."""
-    # Escape double-quotes so a `"` in the message doesn't break the AppleScript
-    # string literal. osascript parses the -e argument as AppleScript source;
-    # an unescaped " terminates the string early and the call fails.
-    safe_title = title.replace('"', '\\"')
-    safe_message = message.replace('"', '\\"')
-    script = f'display notification "{safe_message}" with title "{safe_title}"'
-    try:
-        subprocess.run(
-            ["osascript", "-e", script],
-            check=False,
-            capture_output=True,
-            timeout=5,
-        )
-    except Exception:
-        # timeout, FileNotFoundError (no osascript), or any subprocess error.
-        # The watcher must survive -- notifications are best-effort.
-        pass
-
-
-async def _poll_team(team_key: str) -> None:
-    """Fetch one team's market, record a sample, maybe notify. Never raises (D17).
-
-    Gate (D5): compare current vs the LAST sample (per-poll delta, ~30s ago)
-    -- not the 60s-smoothed delta_1m. "Something just changed" not "movement
-    over the last minute." On gate fire: LLM narrative (D29) with
-    template_narrative as D17 fallback, then send_notification. A per-team
-    cooldown (_last_notified) prevents oscillation spam (500<->650 every poll).
-    """
-    try:
-        # Read the previous sample BEFORE recording the new one (off-by-one
-        # guard: reading after append would make previous == current -> delta
-        # always 0 -> gate never fires).
-        window = _rolling.get(team_key)
-        previous_bp = window[-1][1] if window else None
-
-        fetched = await _get_cached_or_fetch(team_key)
-        if fetched is None:
-            return
-        market, _ = fetched
-        fields = extract_market_fields(market)
-        current_bp = fields["current_prob"]
-        _record_sample(team_key, current_bp, time.monotonic())
-
-        # Gate -> LLM content (D5: gate decides when, LLM decides what).
-        if not should_notify(current_bp, previous_bp):
-            return
-        # Cooldown: one notification per team per COOLDOWN_SECONDS.
-        now = time.monotonic()
-        last = _last_notified.get(team_key, 0.0)
-        if now - last < COOLDOWN_SECONDS:
-            return
-        _last_notified[team_key] = now
-
-        # Build display dict for the LLM + template (same shape as the endpoint).
-        display_name = team_key.replace("_", " ").title()
-        current_prob_f = current_bp / 10000.0 if current_bp is not None else None
-        previous_prob_f = previous_bp / 10000.0 if previous_bp is not None else None
-        delta_bp = (
-            (current_bp - previous_bp)
-            if current_bp is not None and previous_bp is not None
-            else None
-        )
-        delta_f = delta_bp / 10000.0 if delta_bp is not None else None
-        display = {
-            "team": display_name,
-            "opponent": fields["opponent"],
-            "match_status": fields["match_status"],
-            "current_prob": current_prob_f,
-            "previous_prob": previous_prob_f,
-            "delta_1m": delta_f,
-            "volume": fields["volume"],
-        }
-        # D17: LLM fails -> template_narrative. The notification always carries
-        # a human-readable body even when the LLM is down.
-        try:
-            narrative = await generate_narrative(display)
-            if not verify_narrative(narrative, display):
-                narrative = template_narrative(display)
-        except Exception:
-            narrative = template_narrative(display)
-
-        send_notification(
-            f"{_NOTIF_TITLE_PREFIX}: {display_name}",
-            narrative,
-        )
-    except Exception:
-        pass
-
-
-# Per-team last-notification timestamp (monotonic). Feeds the cooldown.
-_last_notified: dict[str, float] = {}
-
-
-async def _watcher_loop() -> None:
-    """Poll every team continuously. Runs until cancelled.
-
-    A INTER_TEAM_DELAY_SECONDS delay between teams spreads a configured subset of teams over ~17s (~3 req/sec) to
-    avoid Kalshi's burst rate limit (429s). No sleep between cycles — the
-    inter-team delay provides natural pacing, and continuous polling keeps
-    the rolling window warm enough for delta_1m to be non-None (needs span
-    >= 60s; with ~17s cycles and a 120s window, span reaches 60s by cycle 4).
-    """
-    while True:
-        for team_key in WATCH_TEAMS:
-            await _poll_team(team_key)
-            await asyncio.sleep(INTER_TEAM_DELAY_SECONDS)
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     global _watcher_task
-    _watcher_task = asyncio.create_task(_watcher_loop())
+    _watcher_task = asyncio.create_task(
+        _watcher_loop(
+            fetcher=fetch_market_for_team,
+            extract_fields=extract_market_fields,
+            generate_narrative=generate_narrative,
+            verify_narrative=verify_narrative,
+            template_narrative=template_narrative,
+        )
+    )
     yield
     if _watcher_task:
         _watcher_task.cancel()
@@ -789,53 +640,6 @@ app = FastAPI(
     description="Kalshi World Cup prediction-market sentiment as developer-consumable JSON.",
     lifespan=lifespan,
 )
-
-# Cache: team_key -> (monotonic_timestamp, (market, match_date)|None). Avoids
-# hitting Kalshi more than every CACHE_TTL_SECONDS (D19, 30s default). Failed
-# fetches are NOT cached -- the next request retries immediately. An "another
-# week" improvement would be stale-while-error (serve the last good entry when
-# Kalshi is down). Stores the (market, match_date) tuple so match_date survives
-# the cache (D26: the date labels match_status downstream).
-_cache: dict[str, tuple[float, tuple[dict, date | None] | None]] = {}
-
-# Rolling window: team_key -> [(monotonic_ts, prob_bp), ...] oldest->newest.
-# Feeds compute_delta (D12). Pruned to the last 60s on each append. Shared by
-# the on-demand endpoint and the watcher (Component 8, nice-to-have).
-_rolling: dict[str, list[tuple[float, int]]] = {}
-
-_WINDOW_MAX_AGE = 120.0  # keep 2m of samples; delta threshold is 60s. Buffer
-#   prevents the pruning-equals-threshold trap: if max age == span threshold
-#   (both 60s), samples are pruned the instant span reaches 60s, so delta is
-#   structurally always-null for any poll interval > a few seconds. The 2x
-#   buffer lets span reach 60s while old samples are still retained.
-
-
-async def _get_cached_or_fetch(team_key: str) -> tuple[dict, date | None] | None:
-    """Return cached (market, match_date) if fresher than CACHE_TTL_SECONDS, else fetch.
-
-    Raises on network error (caller catches -> D17 degraded 200). A failed
-    fetch does NOT update the cache, so the next request retries right away.
-    """
-    now = time.monotonic()
-    entry = _cache.get(team_key)
-    if entry is not None and (now - entry[0]) < CACHE_TTL_SECONDS:
-        return entry[1]
-    result = await fetch_market_for_team(team_key)  # (market, match_date) or None
-    _cache[team_key] = (now, result)
-    return result
-
-
-def _record_sample(team_key: str, prob_bp: int | None, now: float) -> None:
-    """Append (now, prob_bp) to the team's rolling window; prune samples > 2m old.
-
-    prob_bp None (no market / garbage) -> skip (a missing reading is not a 0%).
-    prob_bp 0 (a real 0%) -> recorded (0 is a valid probability, per D27).
-    """
-    if prob_bp is None:
-        return
-    window = _rolling.setdefault(team_key, [])
-    window.append((now, prob_bp))
-    _rolling[team_key] = [s for s in window if now - s[0] <= _WINDOW_MAX_AGE]
 
 
 @app.get("/team/{team_name}", response_model=TeamSentiment)
@@ -866,7 +670,7 @@ async def get_team_sentiment(team_name: str) -> TeamSentiment:
     fetch_failed = False
     match_date: date | None = None
     try:
-        fetched = await _get_cached_or_fetch(team_key)
+        fetched = await _get_cached_or_fetch(team_key, fetch_market_for_team)
         if fetched is not None:
             market, match_date = fetched
         else:
