@@ -21,7 +21,7 @@ Negative bp is NOT tested: price_to_prob (D27) rejects out-of-range -> None,
 so the gate sees None, never negative bp. The gate trusts its caller.
 """
 
-from main import should_notify
+from watcher.core import should_notify
 
 
 # --- Happy path --------------------------------------------------------------
