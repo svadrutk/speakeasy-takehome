@@ -10,7 +10,6 @@ class SyntheticFetcher:
     def __init__(self, jump_after_polls: int = 3):
         self._count = 0
         self._jump_after = jump_after_polls
-        self._jumped = False
 
     async def __call__(self, team_key: str) -> tuple[dict, Optional[date]]:
         self._count += 1

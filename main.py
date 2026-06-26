@@ -607,8 +607,9 @@ def template_narrative(data: dict) -> str:
 # compute_delta (D12) -- cold-start None until the process has >=1m of samples
 # for that team. The on-demand endpoint populates the window as a side effect,
 # so repeated calls for the same team eventually yield a non-None delta_1m.
-# The watcher (Component 8, below) is the PRIMARY window-filler; without it,
-# sporadic curls can't accumulate 1m of span (any gap >60s resets to span=0).
+# The watcher (Component 8, in watcher/core.py) is the PRIMARY window-filler;
+# without it, sporadic curls can't accumulate 1m of span (any gap >60s resets
+# to span=0).
 
 _watcher_task: asyncio.Task | None = None
 
