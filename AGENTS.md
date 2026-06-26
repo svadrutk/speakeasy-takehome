@@ -55,7 +55,7 @@ understands this," stop. You are violating the prime directive.
    review question (see the rehearsal list below), say so: "This is where they'll ask about
    failure modes — here's the answer you'd give."
 
-8. **Keep a running decision log.** Maintain `DECISIONS.md` (or a section of the README) with
+8. **Keep a running decision log.** Maintain `docs/DECISIONS.md` (or a section of the README) with
    every tradeoff, shortcut, and "would do with another week" as it happens. This doubles as
    the engineer's study guide and makes the required write-up trivial.
 
@@ -69,7 +69,7 @@ understands this," stop. You are violating the prime directive.
 3. WRITE the smallest runnable version (engineer types the load-bearing parts).
 4. RUN it. Verify by running, not by reading.
 5. CHECK comprehension: engineer explains it back OR predicts a failure mode.
-6. LOG the decision + tradeoff in DECISIONS.md.
+6. LOG the decision + tradeoff in docs/DECISIONS.md.
 7. Only then move to the next component.
 ```
 

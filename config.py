@@ -90,7 +90,7 @@ LLM_MODEL: str = os.environ.get("LLM_MODEL", "meta-llama/llama-3.1-8b-instruct")
 
 
 # --- Watch list (config file) ----------------------------------------------
-# The watcher polls only these teams (SPEC.md: Watcher(teams)), not all 48.
+# The watcher polls only these teams (docs/SPEC.md: Watcher(teams)), not all 48.
 # Loaded from a JSON file so per-team thresholds can be added later without
 # a format change (AGENTS.md: 'threshold overridable per team'). Falls back
 # to a default list if the file is missing or unreadable. Invalid entries

@@ -6,7 +6,7 @@ verify_narrative: extract numbers from LLM prose, compare to source_data.
     or 12.5). Tolerance via math.isclose(rel_tol=0.02, abs_tol=0.05).
   - Known limitation #1: catches invented STATISTICS, not invented PROSE
     events that carry no numbers. Mitigated by the constrained system
-    prompt (D18); logged in DECISIONS.md.
+    prompt (D18); logged in docs/DECISIONS.md.
   - Known limitation #2: global-set can't catch field-conflation (volume
     12.5M misread as 12.5% prob). Logged as a v1 gap.
 

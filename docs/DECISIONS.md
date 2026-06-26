@@ -1456,3 +1456,69 @@ gate's delta is ~30s — I'd add a label parameter with another week. With
 another week I'd also wire per-team threshold overrides from the config file,
 which the gate signature already supports."
 
+---
+
+## D37. Watcher extraction + standalone demo CLI (DI, synthetic source, cache bypass)
+
+**Chose:** Extracted the watcher (poll loop, gate, notify, shared state) out of `main.py`
+into a reusable `watcher/core.py` with dependency injection — `fetcher`,
+`extract_fields`, `generate_narrative`, `verify_narrative`, `template_narrative` are
+injected into `_poll_team`/`_watcher_loop`. Added `watcher/demo.py` (`SyntheticFetcher`:
+flat 5000bp then jumps to 6500bp after N polls) and `watcher/__main__.py` (CLI with
+`--demo`/`--jump-after`). `main.py` imports the shared state (`_rolling`,
+`_get_cached_or_fetch`, `_record_sample`, `_watcher_loop`) and injects the real Kalshi
+fetcher + LLM in `lifespan`. The CLI feeds the synthetic move through the REAL pipeline
+(gate → LLM/template → osascript) to fire a notification on cue — the live-review demo.
+
+**Why:** Two goals. (1) A standalone CLI you can run without the FastAPI server — the demo
+fires a real macOS notification on cue without needing Kalshi to be live or a match to be
+in progress. (2) A clean seam so a second data source or a different narrative backend can
+be wired without touching `watcher.core`. DI keeps `watcher.core` import-free of `main` (no
+circular import): `main → watcher.core`, `watcher.__main__ → main → watcher.core`.
+
+**The cache-bypass fix (real bug found during the build):** `_get_cached_or_fetch` caches
+the first fetch for `CACHE_TTL_SECONDS` (30s). In demo mode the `SyntheticFetcher` jumps
+5000→6500bp, but after poll 1 the cache returns the stale 5000bp — the gate never sees the
+jump and the demo never fires. Added a `use_cache: bool = True` param to
+`_poll_team`/`_watcher_loop`: live mode keeps the cache (rate-limit protection, D19); demo
+passes `use_cache=False` so each poll hits the fetcher. `reset_demo_state` also clears
+`_cache` so a demo starts cold. Default `True` preserves live behavior exactly — `main.py`'s
+`lifespan` and the on-demand endpoint are unchanged.
+
+**Rejected:**
+- *Keeping the watcher inline in `main.py`* — no standalone CLI, no demo, can't swap the data
+  source. The whole point of the demo is a seam.
+- *LLM-as-gatekeeper for the demo* — untestable; the deterministic gate (D5) already decides
+  when.
+- *A `--no-cache` CLI flag instead of `use_cache` on the loop* — the cache decision belongs
+  to the data source, not the CLI. `use_cache` is a generic loop concern that the demo (and
+  any future non-stationary source) sets to `False`; the CLI is one caller.
+- *Per-team synthetic counter (so every team fires)* — `SyntheticFetcher._count` is shared
+  across `WATCH_TEAMS`; with `--jump-after 2` only the first-polled team transitions and
+  fires (exactly one notification). Acceptable — the demo's purpose is "fire on cue," not
+  "fire for every team."
+
+**Another week:**
+- *Per-team synthetic counter* so the demo fires one notification per configured team.
+- *Graceful SIGINT* in `__main__` (currently `asyncio.run` propagates `KeyboardInterrupt` on
+  Ctrl-C — a traceback in the demo, not a bug).
+- *A neutral `state.py`* for `_rolling`/`_cache`/`_last_notified` so `main.py` (the service)
+  doesn't depend on `watcher.core` (the background watcher) for shared state. Today the
+  watcher is the primary window-filler so the home is defensible, but it's a mild inversion.
+- *Demo isolation* — `watcher/__main__.py` imports `main` at top level, so `--demo`
+  (synthetic, no Kalshi) still pulls in the FastAPI/httpx/LLM tree. A lazy import would make
+  the demo lighter.
+
+**Review answer:** "I extracted the watcher into `watcher/core.py` with dependency injection
+so I could run it two ways: live, wired to the real Kalshi fetcher and LLM via
+`main.lifespan`; and a standalone CLI with `--demo`, which feeds a `SyntheticFetcher` (flat
+5000bp, then a jump to 6500bp on cue) through the REAL gate, LLM/template, and osascript
+pipeline to fire a notification on cue. The DI seam means `watcher.core` never imports
+`main` — no circular import — and a second prediction-market source is just a different
+`fetcher` arg. One real bug surfaced during the build: the 30s fetch cache masked the
+synthetic jump, so the demo never fired. I added a `use_cache` flag — live keeps the cache
+for rate-limit safety, demo bypasses it. The default is `True`, so the live path is
+unchanged. A known demo quirk: the synthetic counter is shared across teams, so
+`--jump-after 2` fires exactly one notification for the first-polled team — fine for a demo,
+a per-team counter with another week."
+

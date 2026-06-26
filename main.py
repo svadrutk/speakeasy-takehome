@@ -5,7 +5,7 @@ WebSocket — WS requires RSA auth even for public channels (D16), and the
 100 req/sec REST limit is generous for our scale.
 
 The background watcher polls a configured subset of teams (WATCH_TEAMS,
-loaded from watch_teams.json), not all 48 in TEAMS — matches SPEC.md's
+loaded from watch_teams.json), not all 48 in TEAMS — matches docs/SPEC.md's
 Watcher(teams) design. A team not in WATCH_TEAMS still works on-demand,
 but its delta_1m is always null (no watcher warming its window).
 """
@@ -528,7 +528,7 @@ def verify_narrative(narrative: str, source_data: dict) -> bool:
     no-numbers rule, or "" passes vacuously). Allowed set includes
     previous = p - d, since the LLM expresses delta indirectly as "from X%
     to Y%". Known gaps: prose-only inventions, field-conflation -- both
-    logged in DECISIONS.md, mitigated by the constrained prompt (D18).
+    logged in docs/DECISIONS.md, mitigated by the constrained prompt (D18).
     """
     if not narrative:
         return False
