@@ -1,0 +1,6 @@
+[build]
+# Force Dockerfile builds to avoid ambiguity; startCommand is ignored in this mode.
+builder = "dockerfile"
+
+[service]
+startCommand = "uv run uvicorn main:app --host 0.0.0.0 --port $PORT"
