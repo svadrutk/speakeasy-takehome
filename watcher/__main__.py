@@ -29,6 +29,7 @@ def main_cli() -> None:
                 verify_narrative=main.verify_narrative,
                 template_narrative=main.template_narrative,
                 trace=_trace,
+                use_cache=False,
             )
         )
     else:

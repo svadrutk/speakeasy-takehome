@@ -96,6 +96,7 @@ async def _poll_team(
     verify_narrative: Callable[[str, dict], bool],
     template_narrative: Callable[[dict], str],
     trace: TraceFn | None = None,
+    use_cache: bool = True,
 ) -> None:
     """Fetch one team's market, record a sample, maybe notify. Never raises.
 
@@ -106,7 +107,10 @@ async def _poll_team(
         window = _rolling.get(team_key)
         previous_bp = window[-1][1] if window else None
 
-        fetched = await _get_cached_or_fetch(team_key, fetcher)
+        if use_cache:
+            fetched = await _get_cached_or_fetch(team_key, fetcher)
+        else:
+            fetched = await fetcher(team_key)
         if fetched is None:
             if trace:
                 trace(f"{team_key}: no market -> skip")
@@ -184,6 +188,7 @@ async def _watcher_loop(
     verify_narrative: Callable[[str, dict], bool],
     template_narrative: Callable[[dict], str],
     trace: TraceFn | None = None,
+    use_cache: bool = True,
 ) -> None:
     while True:
         for team_key in WATCH_TEAMS:
@@ -195,14 +200,16 @@ async def _watcher_loop(
                 verify_narrative=verify_narrative,
                 template_narrative=template_narrative,
                 trace=trace,
+                use_cache=use_cache,
             )
             await asyncio.sleep(INTER_TEAM_DELAY_SECONDS)
 
 
 def reset_demo_state() -> None:
-    """Reset rolling + cooldown state for clean demo runs."""
+    """Reset rolling + cache + cooldown state for clean demo runs."""
     _rolling.clear()
     _last_notified.clear()
+    _cache.clear()
 
 
 # Public API
