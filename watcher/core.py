@@ -1,3 +1,17 @@
+"""Background watcher: polls Kalshi markets for configured teams and fires
+macOS notifications when a team's probability moves meaningfully.
+
+Dependency-injected so the data source and narrative functions can be swapped
+(main.py wires the real Kalshi fetcher + LLM; the demo CLI wires a synthetic
+fetcher). Shared state (_rolling, _cache, _last_notified) lives here because
+the watcher is the primary window-filler; main.py's endpoint imports _rolling
+and _record_sample to warm the same window for on-demand curls.
+
+Design: a deterministic gate (should_notify) decides WHEN to notify; the LLM
+(only when the gate fires) decides WHAT to say. The watcher never raises
+(D17): a notify/poll failure must not take down the window-filler.
+"""
+
 from __future__ import annotations
 
 import asyncio
