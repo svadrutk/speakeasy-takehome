@@ -99,3 +99,11 @@ uv sync
 # Requires OPENROUTER_API_KEY in .env for full LLM functionality
 uv run uvicorn main:app --reload
 ```
+
+### Background Watcher
+To run the macOS notification watcher locally (ensure watch_teams.json is configured with your target teams):
+
+```
+# The --demo flag simulates an odds jump after 2 polling cycles to test notifications
+uv run python -m watcher --demo --jump-after 2
+```
