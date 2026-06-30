@@ -86,8 +86,8 @@ For more information, please refer to my `AGENTS.md`.
 ## Running It
 The API is hosted at `https://speakeasy-wc-production.up.railway.app/`. 
 
-To see available teams, hit the root or teams endpoint:
-`curl https://speakeasy-wc-production.up.railway.app/teams`
+To see available teams, hit the root endpoint:
+`curl https://speakeasy-wc-production.up.railway.app/`
 
 Then query a specific team (best results with an ongoing/upcoming match):
 `curl https://speakeasy-wc-production.up.railway.app/team/brazil`
