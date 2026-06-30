@@ -9,7 +9,7 @@ I have been watching the World Cup fervently in the last couple weeks and try to
 ```mermaid
 flowchart LR
     %% Shared State
-    Window[("Rolling Window State\n(Shared Memory, 120s limit)")]
+    Window[("Rolling Window\n(120s)")]
 
     %% External Dependencies
     subgraph External ["External APIs"]
@@ -18,24 +18,31 @@ flowchart LR
         OpenRouter[("OpenRouter REST\n(Llama 3.1)")]
     end
 
+    %% Shared LLM Pipeline
+    subgraph LLM ["LLM Pipeline (shared: generate_narrative → verify → template fallback)"]
+        direction LR
+        XForm["Build Display\n(bps, delta, volume)"]
+        Gen["LLM Inference\n(generate_narrative)"]
+        Vfy{"Verify +\nTemplate Fallback"}
+
+        XForm --> Gen
+        Gen --> Vfy
+    end
+
     %% Synchronous API Path
     subgraph Service ["FastAPI Service (Sync)"]
         direction LR
         Req(["GET /team/{team}"])
-        MarketCache{"30s Market Cache"}
-        EventsCache{"30s Events/Markets Cache\n(1 call per cycle, not 48)"}
-        Transforms["Transforms\n(bps, delta_1m)"]
-        LLM_Service["LLM Inference"]
-        Guard{"Hallucination Guard"}
+        EventsCache{"Events List\n(_events_cache, 30s)"}
+        MarketsCache{"Markets/Event\n(_markets_cache, 30s)"}
+        ResultCache{"Market Result\n(_cache, 30s)"}
         Out(["JSON 200 Response"])
 
-        Req --> MarketCache
-        MarketCache --> Transforms
-        Transforms --> LLM_Service
-        LLM_Service --> Guard
-        Guard --> Out
-        Kalshi -.-> EventsCache
-        EventsCache -.-> MarketCache
+        Req --> ResultCache
+        EventsCache -.-> ResultCache
+        MarketsCache -.-> ResultCache
+        ResultCache --> XForm
+        Vfy --> Out
     end
 
     %% Asynchronous Background Path
@@ -43,22 +50,22 @@ flowchart LR
         direction LR
         Poll["Poll watch_teams.json"]
         Gate{"Delta >= Threshold"}
-        LLM_Watcher["LLM / Template Narrative"]
-        Notify(["macOS Notification\n(5m cooldown)"])
+        Notif(["macOS Notification\n(5m cooldown)"])
 
         Poll --> Gate
-        Gate -- "Fires" --> LLM_Watcher
-        LLM_Watcher --> Notify
+        Gate -- fires --> XForm
+        Vfy --> Notif
     end
 
-    %% Routing / Data Flow
+    %% External feeds
     Kalshi --> Poll
-    OpenRouter -.-> LLM_Service
-    OpenRouter -.-> LLM_Watcher
+    Kalshi -.-> EventsCache
+    Kalshi -.-> MarketsCache
+    OpenRouter -.-> Gen
 
-    %% Shared State Interaction
-    Watcher -- "Record sample &\nRead previous_bp" --> Window
-    Window -. "Read delta_1m" .-> Transforms
+    %% Shared State
+    Watcher -- "Record sample" --> Window
+    Window -. "Read delta" .-> XForm
 ```
 
 ### Key Features
