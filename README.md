@@ -22,17 +22,20 @@ flowchart LR
     subgraph Service ["FastAPI Service (Sync)"]
         direction LR
         Req(["GET /team/{team}"])
-        Cache{"30s In-Memory Cache"}
+        MarketCache{"30s Market Cache"}
+        EventsCache{"30s Events/Markets Cache\n(1 call per cycle, not 48)"}
         Transforms["Transforms\n(bps, delta_1m)"]
         LLM_Service["LLM Inference"]
         Guard{"Hallucination Guard"}
         Out(["JSON 200 Response"])
 
-        Req --> Cache
-        Cache --> Transforms
+        Req --> MarketCache
+        MarketCache --> Transforms
         Transforms --> LLM_Service
         LLM_Service --> Guard
         Guard --> Out
+        Kalshi -.-> EventsCache
+        EventsCache -.-> MarketCache
     end
 
     %% Asynchronous Background Path
@@ -49,7 +52,6 @@ flowchart LR
     end
 
     %% Routing / Data Flow
-    Kalshi --> Cache
     Kalshi --> Poll
     OpenRouter -.-> LLM_Service
     OpenRouter -.-> LLM_Watcher
@@ -63,12 +65,14 @@ flowchart LR
 - Kalshi public REST API call needs no auth 
 - Watcher shares rolling 2m window with API endpoint 
 - LLM is a final transform, never a decision-maker 
+- Opponent extracted from the event ticker (3-letter FIFA codes), not Kalshi's `yes_sub_title` which changes format without notice 
 
 ## Tradeoffs
 - Deterministic gate vs LLM-judge: Notifications trigger via strict math (relative delta threshold). The LLM only writes the prose. Ensures testability and prevents hallucinated spam or silent failures.
 - Graceful degradation (Always `200 OK`): Kalshi or LLM outages return null data fields with a fallback template narrative. Clients don't crash; developers/fans always get a readable status.
 - REST polling vs WebSockets: Used Kalshi's public `REST API` instead of WebSockets. Public `REST` requires zero auth. At our scale (watching 3-5 teams), polling is highly viable and debuggable.
 - Integer basis points: All internal probability math uses integers (`5% = 500bp`). Floats only appear at the final `JSON` boundary. Prevents floating-point precision drift. 
+- Events/markets caching: Three separate 30s caches (market results, events list, markets per event). The events cache prevents 48 identical `/events` calls per watcher cycle — without it, the 48-team poll hits Kalshi's rate limit. 
 - Knockout-stage advance markets: `fetch_per_match_market` checks the `KXWCADVANCE` series ("to advance" including extra time/penalties) before falling back to `KXWCGAME` (regulation time only). In knockout rounds the regulation-time markets show ~1-2% per side and ~96% tie, while the advance markets show the real ~50% probability fans expect. Construction is a simple series-prefix swap on the event ticker we already found.
 
 ## To Improve

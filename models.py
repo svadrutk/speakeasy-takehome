@@ -20,7 +20,7 @@ class TeamSentiment(BaseModel):
         None, description="Opponent if a per-match market, null for tournament-winner fallback"
     )
     match_status: str | None = Field(
-        None, description="'live', 'scheduled', 'closed', or null for tournament-winner"
+        None, description="'ongoing', 'scheduled', 'closed', or null for tournament-winner"
     )
     market: str | None = Field(None, description="Kalshi market ticker, null if no market found")
     current_prob: float | None = Field(
