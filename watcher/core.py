@@ -91,7 +91,7 @@ async def _poll_team(
     team_key: str,
     *,
     fetcher: Callable[[str], Awaitable[tuple[dict, date | None] | None]],
-    extract_fields: Callable[[dict | None, Optional[date]], dict],
+    extract_fields: Callable[[dict | None, Optional[date], Optional[str]], dict],
     generate_narrative: Callable[[dict], Awaitable[str]],
     verify_narrative: Callable[[str, dict], bool],
     template_narrative: Callable[[dict], str],
@@ -116,7 +116,8 @@ async def _poll_team(
                 trace(f"{team_key}: no market -> skip")
             return
         market, match_date = fetched
-        fields = extract_fields(market, match_date)
+        display_name = team_key.replace("_", " ").title()
+        fields = extract_fields(market, match_date, display_name)
         current_bp = fields["current_prob"]
         now = time.monotonic()
         _record_sample(team_key, current_bp, now)
@@ -139,8 +140,6 @@ async def _poll_team(
                 trace(f"{team_key}: cooldown -> suppress")
             return
         _last_notified[team_key] = now_m
-
-        display_name = team_key.replace("_", " ").title()
         current_prob_f = current_bp / 10000.0 if current_bp is not None else None
         previous_prob_f = previous_bp / 10000.0 if previous_bp is not None else None
         delta_bp = (
@@ -183,7 +182,7 @@ async def _poll_team(
 async def _watcher_loop(
     *,
     fetcher: Callable[[str], Awaitable[tuple[dict, date | None] | None]],
-    extract_fields: Callable[[dict | None, Optional[date]], dict],
+    extract_fields: Callable[[dict | None, Optional[date], Optional[str]], dict],
     generate_narrative: Callable[[dict], Awaitable[str]],
     verify_narrative: Callable[[str, dict], bool],
     template_narrative: Callable[[dict], str],

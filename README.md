@@ -69,7 +69,7 @@ flowchart LR
 - Graceful degradation (Always `200 OK`): Kalshi or LLM outages return null data fields with a fallback template narrative. Clients don't crash; developers/fans always get a readable status.
 - REST polling vs WebSockets: Used Kalshi's public `REST API` instead of WebSockets. Public `REST` requires zero auth. At our scale (watching 3-5 teams), polling is highly viable and debuggable.
 - Integer basis points: All internal probability math uses integers (`5% = 500bp`). Floats only appear at the final `JSON` boundary. Prevents floating-point precision drift. 
-- Configured watch list: The background loop tracks a configured subset (`watch_teams.json`), not all 48 teams. Avoids an `O(N)` cycle-time scaling cliff and wasted `API` calls.
+- Knockout-stage advance markets: `fetch_per_match_market` checks the `KXWCADVANCE` series ("to advance" including extra time/penalties) before falling back to `KXWCGAME` (regulation time only). In knockout rounds the regulation-time markets show ~1-2% per side and ~96% tie, while the advance markets show the real ~50% probability fans expect. Construction is a simple series-prefix swap on the event ticker we already found.
 
 ## To Improve
 - Server-Sent Events (`SSE`): Upgrade the polling endpoint to stream real-time JSON updates to clients.

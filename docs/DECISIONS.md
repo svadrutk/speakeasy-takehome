@@ -373,6 +373,107 @@ Every endpoint we tested (events, markets, series, milestones) works with zero a
 
 ---
 
+## D32. Knockout-stage markets: KXWCADVANCE series ("to advance" including ET/penalties)
+
+**Bug (Jun 29):** Morocco vs Netherlands knockout match showed `current_prob: 1-2%` per side,
+but the user expected ~50% — the real probability of advancing. Root cause: our code only
+searched the `KXWCGAME` series, whose markets are regulation-time **only**. In knockout
+rounds where a match is likely to go to penalties, the KXWCGAME markets show ~1-2% per side
+and ~96% tie. The actual "who advances" probability lives in a separate `KXWCADVANCE` series.
+
+**Discovery:** The user linked `kalshi.com/markets/kxwcadvance/...` — a market ticker starting
+with `KXWCADVANCE`, not `KXWCGAME`. The API confirmed:
+- `KXWCADVANCE-26JUN29NEDMAR-NED`: 52% (Netherlands to advance)
+- `KXWCADVANCE-26JUN29NEDMAR-MAR`: 49% (Morocco to advance)
+- `KXWCGAME-26JUN29NEDMAR-MAR`: 1-2% (Morocco to win in regulation time only)
+
+**Fix:** In `fetch_per_match_market`, after finding the KXWCGAME event, construct the
+corresponding `KXWCADVANCE` market ticker by replacing the series prefix (`KXWCGAME-` →
+`KXWCADVANCE-`) and try to fetch it directly. If it exists (knockout stage), return it;
+if 404 (group stage), fall back to the KXWCGAME market.
+
+```python
+advance_event = chosen_ticker.replace("KXWCGAME-", "KXWCADVANCE-")
+advance_market_ticker = f"{advance_event}-{pm}"
+try:
+    resp = await _fetch_json(f"markets/{advance_market_ticker}")
+    advance_market = resp.get("market")
+    if advance_market is not None:
+        return advance_market, chosen_date
+except httpx.HTTPStatusError as e:
+    if e.response.status_code != 404:
+        raise
+# 404 → no KXWCADVANCE for this fixture, fall through to KXWCGAME
+```
+
+**Why this approach:**
+- Uses the event we already found — zero extra search cost.
+- One direct market fetch — fast, no events-list pagination.
+- 404 is the expected signal for "group stage, no advance market" — clean fallthrough.
+
+**Rejected:**
+- *Search KXWCADVANCE events first* — the events endpoint only lists future matches (JUL01+),
+  not today's ongoing matches. The market exists even when the event isn't listed.
+- *Return both markets* — more API surface, harder to explain in review, unnecessary for
+  a "one narrative per team" product.
+
+**Review answer:** "In the group stage, Kalshi only has `KXWCGAME` markets — regulation time
+only. In knockout rounds, they added a second series `KXWCADVANCE` for 'to advance' including
+extra time and penalties. Our code now tries the advance market first; if it exists we return
+it, otherwise we fall back to regulation-time. The construction is simple: replace `KXWCGAME-`
+with `KXWCADVANCE-` in the event ticker we already found."
+
+---
+
+## D31. Opponent extraction: known team name instead of yes_sub_title parsing
+
+**Bug (Jun 29):** Morocco vs Netherlands match returned `opponent: None` and `match_status: None`
+despite the correct per-match market (`KXWCGAME-26JUN29NEDMAR-MAR`). Root cause: Kalshi's
+`yes_sub_title` changed from `"Morocco"` to `"Reg Time: Morocco"`. The old `_extract_opponent`
+did a substring match of the full `yes_sub_title` against title parts — `"Reg Time: Morocco"`
+was not a substring of `"Morocco Winner?"` or `"Netherlands"`, so it returned `None`. This
+cascaded: `opponent=None` → `match_status=None` (gated behind `if opponent is not None`),
+→ narrative said `"tournament-winner market"` even though the market was per-match.
+
+**Fix:** Thread the known team display name (e.g., `"Morocco"`) into `extract_market_fields`
+and `_extract_opponent`. The caller already knows which team it asked for, so this identifier
+is independent of Kalshi's `yes_sub_title` format which changes without notice.
+
+**Implementation:**
+- `extract_market_fields(market, match_date, team_name=None)` — optional third parameter.
+- `_extract_opponent(title, yes_sub_title, team_name=None)` — uses `team_name` when provided,
+  falls back to `yes_sub_title` when not (backward compat).
+- Endpoint passes `display_name` (computed from `team_key`) to `extract_market_fields`.
+- Watcher `_poll_team` derives `display_name` from `team_key` and passes it to `extract_fields`.
+- Type annotations updated in `watcher/core.py` (`Optional[str]` third param).
+
+**Why this approach:**
+- Removes dependency on `yes_sub_title` format — Kalshi can prepend `"Reg Time: "`,
+  `"Regulation: "`, `"90 Min: "` or drop it entirely; our code doesn't care.
+- Uses information we already have (the user asked for "Morocco") rather than parsing
+  Kalshi's unstable prose.
+- Backward compatible: existing callers without `team_name` still work (falls back to old logic).
+
+**Rejected:**
+- *Strip the prefix* (`"Reg Time: Morocco"` → `"Morocco"`) — exactly the brittleness the
+  user flagged. Next month it could be `"Regulation: "` or `"90 Min: "` and we're back here.
+- *Word overlap* — check if words from `yes_sub_title` appear in title parts. Handles the
+  prefix but still depends on `yes_sub_title` existing and being parseable; multi-word team
+  names (`"South Korea"`) risk partial-match misidentification.
+- *Event-ticker parsing* (`KXWCGAME-26JUN29NEDMAR` → split `NEDMAR` into `NED` + `MAR`) —
+  most robust in principle, but requires the same D26 fixed-position slicing we already
+  flagged as fragile, plus a reverse code→name mapping. More code, more seams, more review
+  surface area. The team-name approach is simpler and equally robust against format changes.
+
+**Review answer:** "I extract the opponent from the market title, but I don't rely on
+Kalshi's `yes_sub_title` which changes format without notice — it used to be 'Morocco',
+now it's 'Reg Time: Morocco'. Instead I pass the team name I already know ('Morocco')
+into the extractor, so it identifies which side of 'vs' is ours and returns the other.
+If Kalshi renames the field or changes its format, our code doesn't care. The fallback
+keeps backward compatibility for any callers that don't pass a team name."
+
+---
+
 ## Open questions (to resolve during the build)
 
 1. **Notification threshold value** — start with 20% relative delta, tune during spike.

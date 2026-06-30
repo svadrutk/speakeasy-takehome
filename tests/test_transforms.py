@@ -201,6 +201,21 @@ def test_extract_market_fields_opponent_team_first_in_title():
     assert result["opponent"] == "Scotland"
 
 
+def test_extract_market_fields_opponent_with_prefixed_yes_sub_title():
+    # Kalshi changed yes_sub_title to "Reg Time: Morocco" — the old substring
+    # match failed because the full string isn't in the title. Passing team_name
+    # (our known display name) bypasses yes_sub_title format entirely.
+    result = extract_market_fields(
+        _per_match_market(
+            title="Netherlands vs Morocco Winner?",
+            yes_sub_title="Reg Time: Morocco",
+        ),
+        team_name="Morocco",
+    )
+    assert result["opponent"] == "Netherlands"
+    assert result["match_status"] == "scheduled"
+
+
 def test_extract_market_fields_empty_dict_no_crash():
     # Empty dict (e.g. Kalshi returned 200 with empty body) -> all None, no crash.
     result = extract_market_fields({})

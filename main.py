@@ -198,6 +198,25 @@ async def fetch_per_match_market(pm: str) -> tuple[dict, date] | None:
     if closest is None:
         return None
     chosen_ticker, chosen_date = closest
+
+    # Knockout-stage check: KXWCADVANCE series ("to advance" including ET/penalties)
+    # may exist for the same fixture. It's more meaningful than KXWCGAME (regulation
+    # time only) in knockout rounds — the latter shows ~1-2% per side when a tie is
+    # ~96%, while KXWCADVANCE shows the real ~50% advance probability.
+    # We construct the ticker by replacing the series prefix and fetch directly.
+    advance_event = chosen_ticker.replace("KXWCGAME-", "KXWCADVANCE-")
+    advance_market_ticker = f"{advance_event}-{pm}"
+    try:
+        resp = await _fetch_json(f"markets/{advance_market_ticker}")
+        advance_market = resp.get("market")
+        if advance_market is not None:
+            return advance_market, chosen_date
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code != 404:
+            raise
+        # 404 = no KXWCADVANCE market for this fixture (group stage), fall through
+
+    # Fall back to KXWCGAME (regulation-time only).
     markets = await _get_markets_for_event(chosen_ticker)
     suffix = f"-{pm}"
     for m in markets:
@@ -283,19 +302,37 @@ def _parse_int_amount(s: str | None) -> int | None:
         return None
 
 
-def _extract_opponent(title: str | None, yes_sub_title: str | None) -> str | None:
+def _extract_opponent(
+    title: str | None,
+    yes_sub_title: str | None,
+    team_name: str | None = None,
+) -> str | None:
     """Parse opponent from a per-match market title.
-    'Scotland vs Brazil Winner?' + yes_sub='Brazil' -> 'Scotland'.
-    Tournament-winner titles have no ' vs ' -> None."""
-    if not title or not yes_sub_title or " vs " not in title:
+
+    Uses the known team_name when provided (Approach 3 — robust against
+    yes_sub_title format changes like "Reg Time: Morocco"). Falls back to
+    yes_sub_title substring matching when team_name is not provided.
+
+    'Scotland vs Brazil Winner?' + team_name='Brazil' -> 'Scotland'.
+    Tournament-winner titles have no ' vs ' -> None.
+    """
+    if not title or " vs " not in title:
         return None
     parts = title.split(" vs ")
     if len(parts) != 2:
         return None
-    # Our team's side contains yes_sub_title; opponent is the other side.
-    if yes_sub_title in parts[1]:
+
+    # Our team's side contains the team identifier; opponent is the other side.
+    # team_name is our preferred identifier (display name, e.g. "Morocco").
+    # It is passed from the caller (endpoint or watcher) who already knows
+    # which team we asked for, so it is independent of Kalshi's yes_sub_title
+    # format which changes without notice (e.g. "Reg Time: Morocco").
+    identifier = team_name if team_name is not None else yes_sub_title
+    if not identifier:
+        return None
+    if identifier in parts[1]:
         opponent_side = parts[0]
-    elif yes_sub_title in parts[0]:
+    elif identifier in parts[0]:
         opponent_side = parts[1]
     else:
         return None
@@ -303,7 +340,11 @@ def _extract_opponent(title: str | None, yes_sub_title: str | None) -> str | Non
     return words[0] if words else None
 
 
-def extract_market_fields(market: dict | None, match_date: date | None = None) -> dict:
+def extract_market_fields(
+    market: dict | None,
+    match_date: date | None = None,
+    team_name: str | None = None,
+) -> dict:
     """Pull structured fields from a raw Kalshi market object.
 
     Returns a dict with: opponent, match_status, market, current_prob,
@@ -339,7 +380,7 @@ def extract_market_fields(market: dict | None, match_date: date | None = None) -
     yes_sub = market.get("yes_sub_title")
     status = market.get("status", "")
 
-    opponent = _extract_opponent(title, yes_sub)
+    opponent = _extract_opponent(title, yes_sub, team_name)
 
     # Match status: only meaningful for per-match markets (opponent is not None).
     if opponent is not None:
@@ -680,7 +721,7 @@ async def get_team_sentiment(team_name: str) -> TeamSentiment:
         market = None
 
     # 3. Extract structured fields (pure, never raises). current_prob is in bp.
-    fields = extract_market_fields(market, match_date)
+    fields = extract_market_fields(market, match_date, display_name)
 
     # 4. Update rolling window + compute delta (bp internally, D27).
     now = time.monotonic()
