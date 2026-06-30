@@ -10,7 +10,7 @@ arithmetic anywhere. 5% = 500 bp. The endpoint converts bp -> float at the
 JSON output boundary only.
 """
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 from main import compute_delta, extract_market_fields, price_to_prob
 
@@ -294,3 +294,77 @@ def test_match_status_tournament_winner_ignores_date():
     }
     result = extract_market_fields(market, match_date=date.today())
     assert result["match_status"] is None
+
+
+# --- match_status: occurrence_datetime (D26 fix, primary path) --------------
+# Kalshi sets `occurrence_datetime` (exact UTC kickoff) on every per-match
+# market. It supersedes the ticker-string date: the ticker embeds the LOCAL
+# matchday, so a late-ET kickoff crosses the UTC date boundary and the day-
+# grained calc mislabels it. occurrence_datetime is UTC + minute-precise.
+# 30m pre-kickoff grace: flip scheduled->ongoing 30m before kickoff.
+
+
+def _now_utc():
+    return datetime.now(timezone.utc)
+
+
+def test_match_status_occurrence_far_future_is_scheduled():
+    # Kickoff 5h out -> well past the 30m grace -> scheduled.
+    occ = _now_utc() + timedelta(hours=5)
+    result = extract_market_fields(_per_match_market(occurrence_datetime=occ.isoformat()))
+    assert result["match_status"] == "scheduled"
+
+
+def test_match_status_occurrence_just_outside_grace_is_scheduled():
+    # Kickoff 31m out -> just past the 30m grace boundary -> scheduled.
+    occ = _now_utc() + timedelta(minutes=31)
+    result = extract_market_fields(_per_match_market(occurrence_datetime=occ.isoformat()))
+    assert result["match_status"] == "scheduled"
+
+
+def test_match_status_occurrence_inside_grace_is_ongoing():
+    # Kickoff 10m out -> within the 30m grace -> ongoing (imminent kickoff).
+    occ = _now_utc() + timedelta(minutes=10)
+    result = extract_market_fields(_per_match_market(occurrence_datetime=occ.isoformat()))
+    assert result["match_status"] == "ongoing"
+
+
+def test_match_status_occurrence_just_past_kickoff_is_ongoing():
+    # Kickoff 5m ago, still active (not finalized) -> ongoing (in play).
+    occ = _now_utc() - timedelta(minutes=5)
+    result = extract_market_fields(_per_match_market(occurrence_datetime=occ.isoformat()))
+    assert result["match_status"] == "ongoing"
+
+
+def test_match_status_occurrence_settled_overrides_time():
+    # status finalized beats occurrence: a finalized market is closed even in
+    # the ongoing window. Settlement is authoritative.
+    occ = _now_utc() - timedelta(minutes=5)
+    result = extract_market_fields(
+        _per_match_market(status="finalized", occurrence_datetime=occ.isoformat())
+    )
+    assert result["match_status"] == "closed"
+
+
+def test_match_status_occurrence_garbage_falls_back_to_date():
+    # Garbage occurrence_datetime -> don't crash, fall back to match_date path.
+    result = extract_market_fields(
+        _per_match_market(occurrence_datetime="not-a-timestamp"),
+        match_date=date.today() + timedelta(days=1),
+    )
+    assert result["match_status"] == "scheduled"
+
+
+def test_match_status_occurrence_empty_falls_back_to_date():
+    # No occurrence_datetime at all -> match_date fallback (D26 legacy path).
+    result = extract_market_fields(
+        _per_match_market(),
+        match_date=date.today() + timedelta(days=1),
+    )
+    assert result["match_status"] == "scheduled"
+
+
+def test_match_status_occurrence_none_and_no_date_falls_back_to_active():
+    # No occurrence, no date, status active -> scheduled (last-resort fallback).
+    result = extract_market_fields(_per_match_market())
+    assert result["match_status"] == "scheduled"

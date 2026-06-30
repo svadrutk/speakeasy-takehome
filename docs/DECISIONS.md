@@ -1623,3 +1623,51 @@ unchanged. A known demo quirk: the synthetic counter is shared across teams, so
 `--jump-after 2` fires exactly one notification for the first-polled team — fine for a demo,
 a per-team counter with another week."
 
+---
+
+## D38. match_status: use Kalshi `occurrence_datetime` (UTC kickoff) instead of the ticker-string date
+
+**Chose:** Read the market's own `occurrence_datetime` (exact UTC kickoff, set on every
+KXWCADVANCE and KXWCGAME per-match market) and compare to `datetime.now(timezone.utc)`:
+`now < kickoff - 30m` → "scheduled", else → "ongoing", until `status` flips to a settled state
+("finalized"/"closed"/"settled") → "closed". A 30m pre-kickoff grace absorbs minor delays (World
+Cup kickoffs are punctual). The ticker-parsed local matchday (`match_date`) is kept as a fallback
+when `occurrence_datetime` is missing/garbage, then `status == "active"` → "scheduled".
+
+**Why:** The previous calc parsed the *local matchday* out of the event ticker
+(`ticker[9:16]` → "26JUN30") at day granularity and compared to `date.today()`. The ticker
+encodes the **local** matchday, not UTC, so a late-ET kickoff crosses the UTC date boundary:
+MEX/ECU ticker is `KXWCGAME-26JUN30MEXECU` but `occurrence_datetime` is
+`2026-07-01T04:00:00Z` (23:00 ET Jun 30 = 04:00Z Jul 1). Reproducible bugs this caused:
+on Jun 30 UTC daytime (kickoff hours away) it said "ongoing" (should be "scheduled"); on
+Jul 1 just after midnight UTC (match in play) it said "closed" (should be "ongoing"). The old
+test comment even claimed "the real fix needs a kickoff timestamp Kalshi doesn't expose" —
+that was wrong; Kalshi does expose it, on the market object, not the event. occurrence_datetime
+is UTC, minute-precise, on the same market dict we already return — no extra fetch.
+
+**Rejected:** (a) Keep parsing the ticker but switch the comparison to UTC — the ticker holds
+the *local* matchday, so re-deriving UTC from a string is strictly worse than reading the UTC
+kickoff Kalshi already computed. (b) Drop the ticker-date fallback entirely — kept because some
+markets (e.g. tournament-winner `KXMENWORLDCUP-26-BR`) have no single kickoff and some future
+market shape might lack `occurrence_datetime`; the fallback is cheap defensive coding. (c)
+LLM as gatekeeper for scheduled/ongoing — untestable, rejected already in D-choices.
+
+**Another week:**
+- A post-final-whistle cap on "ongoing" — today "ongoing" runs from 30m before kickoff until
+  Kalshi finalizes, which can lag the final whistle (a WC match is ~2h, +ET/penalties up to ~3h).
+  Arguably "ongoing until settled" is *correct* (the market is live), so I left it; a
+  `now > kickoff + 3h → "closed"` heuristic is the upgrade if the lag bothers anyone.
+- Inject a clock into `extract_market_fields` so the boundary test isn't clock-drift-flaky
+  (the exact-grace-boundary test was dropped as racy; 31m→scheduled + 10m→ongoing pin it).
+
+**Review answer:** "The previous scheduled/ongoing calc parsed the local matchday out of the
+ticker at day granularity — but the ticker's date is local and Kalshi's kickoff is UTC, so a
+late-ET game crossed the date boundary and got mislabeled both before and after kickoff. Kalshi
+actually sets `occurrence_datetime`, the exact UTC kickoff, on every per-match market — I read
+that directly and compare to UTC now, with a 30m pre-kickoff grace because WC kickoffs are
+reliable within ~30m. The market is 'ongoing' from 30m before kickoff until Kalshi settles it,
+which is correct because the market is genuinely live that whole window; the ticker-date path
+stays as a fallback for markets without an occurrence time. Failure modes: garbage
+occurrence_datetime falls back to the date path; settled status overrides time; the
+post-final-whistle lag is deliberately un-capped."
+

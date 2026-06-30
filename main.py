@@ -17,7 +17,7 @@ import math
 import re
 import time
 from contextlib import asynccontextmanager
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 
 import httpx
@@ -63,6 +63,11 @@ async def _fetch_json(path: str, params: dict[str, str] | None = None) -> dict:
 # --- Constants for per-match search -----------------------------------------
 
 KXWCGAME_SERIES = "KXWCGAME"
+
+# Pre-kickoff grace for the scheduled->ongoing transition. World Cup kickoffs
+# are reliable within ~30m, so we flip to "ongoing" 30m before occurrence_datetime
+# to absorb minor delays. Wider would guess; narrower misses imminent kickoffs.
+KICKOFF_GRACE = timedelta(minutes=30)
 
 MONTHS = {
     "JAN": 1,
@@ -303,6 +308,23 @@ def _parse_int_amount(s: str | None) -> int | None:
         return None
 
 
+def _parse_utc_dt(s: str | None) -> datetime | None:
+    """Parse a Kalshi ISO-8601 timestamp (trailing-Z UTC) to an aware UTC datetime.
+
+    None on missing/garbage input so callers can fall back to the ticker-date
+    path rather than crash. Kalshi always returns `...Z` (UTC) for time fields.
+    """
+    if not s:
+        return None
+    try:
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
 def _extract_opponent(
     title: str | None,
     yes_sub_title: str | None,
@@ -363,15 +385,15 @@ def extract_market_fields(
     current_prob is in basis points (int 0-10000); the endpoint converts
     to float at the JSON output boundary (D9).
 
-    match_status (D26): Kalshi's `status` is 'active' for every KXWCGAME
-    market until settled, so it can't distinguish scheduled from ongoing
-    from past. `match_date` (parsed from the event ticker in
-    fetch_per_match_market) disambiguates: future -> 'scheduled', today ->
-    'ongoing', past -> 'closed'. A settled status ('finalized'/'closed'/
-    'settled') overrides the date. When match_date is None (tournament-
-    winner, or a caller that didn't thread it), the old 'active' ->
-    'scheduled' fallback applies. match_status is only set for per-match
-    markets (opponent is not None).
+    match_status (D26): Kalshi's `status` is 'active' for every per-match market
+    until settled, so it can't distinguish scheduled from ongoing from past. The
+    market's `occurrence_datetime` (exact UTC kickoff, on every KXWCADVANCE and
+    KXWCGAME market) disambiguates: >30m before kickoff -> 'scheduled', within
+    30m of/after kickoff -> 'ongoing', until status flips to a settled state. A
+    settled status ('finalized'/'closed'/'settled') overrides time. When
+    `occurrence_datetime` is missing/garbage, falls back to the ticker-parsed
+    `match_date` (local matchday, day-granular) and finally to 'active' ->
+    'scheduled'. match_status is only set for per-match markets (opponent set).
     """
     if market is None:
         return {
@@ -395,18 +417,38 @@ def extract_market_fields(
     if opponent is not None:
         if status in ("finalized", "closed", "settled"):
             match_status = "closed"
-        elif match_date is not None:
-            today = date.today()
-            if match_date > today:
-                match_status = "scheduled"
-            elif match_date == today:
-                match_status = "ongoing"
-            else:
-                match_status = "closed"
-        elif status == "active":
-            match_status = "scheduled"
         else:
-            match_status = status or None
+            # Primary: the market's own `occurrence_datetime` — the exact UTC
+            # kickoff Kalshi sets on every per-match market (KXWCADVANCE and
+            # KXWCGAME). Supersedes the ticker-string date (D26 fix): the ticker
+            # embeds the LOCAL matchday, so a late-ET kickoff (23:00 ET = 04:00Z
+            # next day) crossed the UTC date boundary and the day-granular calc
+            # mislabeled it (e.g. MEX/ECU ticker "JUN30", kickoff "2026-07-01T04:00Z"
+            # -> code said "closed" on Jul 1 while the match was in play).
+            # occurrence_datetime is UTC and minute-precise.
+            kickoff = _parse_utc_dt(market.get("occurrence_datetime"))
+            if kickoff is not None:
+                # 30m pre-kickoff grace: WC kickoffs are reliable within ~30m, so
+                # flip scheduled->ongoing 30m before kickoff to absorb minor
+                # delays. Runs "ongoing" until Kalshi finalizes (status flip) —
+                # the market is live until settled, so "ongoing" is correct.
+                now = datetime.now(timezone.utc)
+                match_status = "scheduled" if now < kickoff - KICKOFF_GRACE else "ongoing"
+            elif match_date is not None:
+                # Fallback (D26): occurrence_datetime missing/garbage -> use the
+                # ticker-parsed local matchday. Day-granular; can't cross UTC date
+                # boundaries. Kept because some markets may lack occurrence_datetime.
+                today = date.today()
+                if match_date > today:
+                    match_status = "scheduled"
+                elif match_date == today:
+                    match_status = "ongoing"
+                else:
+                    match_status = "closed"
+            elif status == "active":
+                match_status = "scheduled"
+            else:
+                match_status = status or None
     else:
         match_status = None
 
