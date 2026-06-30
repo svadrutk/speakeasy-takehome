@@ -83,7 +83,7 @@ def test_poll_team_records_sample():
     _cache.clear()
     market = _market_with_prob(3900)
     _poll(
-        fetcher=AsyncMock(return_value=(market, None)),
+        fetcher=AsyncMock(return_value=market),
         generate_narrative=AsyncMock(return_value=""),
     )
     assert "japan" in _rolling
@@ -120,7 +120,7 @@ def test_poll_team_handles_none_prob():
     market = _market_with_prob(3900)
     market["last_price_dollars"] = "garbage"
     _poll(
-        fetcher=AsyncMock(return_value=(market, None)),
+        fetcher=AsyncMock(return_value=market),
         generate_narrative=AsyncMock(return_value=""),
     )
     assert "japan" not in _rolling or len(_rolling["japan"]) == 0
@@ -131,7 +131,7 @@ def test_poll_team_multiple_polls_build_window():
     _reset_rolling()
     _cache.clear()
     market = _market_with_prob(3900)
-    fetcher = AsyncMock(return_value=(market, None))
+    fetcher = AsyncMock(return_value=market)
     gen = AsyncMock(return_value="")
     for _ in range(3):
         _cache.clear()
@@ -150,7 +150,7 @@ def test_gate_fires_sends_notification():
     _reset_notified()
     _cache.clear()
     m1, m2 = _market_with_prob(500), _market_with_prob(650)
-    fetcher = AsyncMock(side_effect=[(m1, None), (m2, None)])
+    fetcher = AsyncMock(side_effect=[m1, m2])
     gen = AsyncMock(return_value="Japan surged to 6.5%.")
     with patch("watcher.core.send_notification") as ms:
         _poll(fetcher=fetcher, generate_narrative=gen)
@@ -169,7 +169,7 @@ def test_gate_below_threshold_no_notification():
     _reset_notified()
     _cache.clear()
     m1, m2 = _market_with_prob(500), _market_with_prob(550)
-    fetcher = AsyncMock(side_effect=[(m1, None), (m2, None)])
+    fetcher = AsyncMock(side_effect=[m1, m2])
     gen = AsyncMock(return_value="Japan nudged up.")
     with patch("watcher.core.send_notification") as ms:
         _poll(fetcher=fetcher, generate_narrative=gen)
@@ -185,7 +185,7 @@ def test_cooldown_suppresses_repeat():
     _reset_notified()
     _cache.clear()
     m1, m2, m3 = _market_with_prob(500), _market_with_prob(650), _market_with_prob(800)
-    fetcher = AsyncMock(side_effect=[(m1, None), (m2, None), (m3, None)])
+    fetcher = AsyncMock(side_effect=[m1, m2, m3])
     gen = AsyncMock(return_value="Japan moved.")
     with patch("watcher.core.send_notification") as ms:
         for _ in range(3):
@@ -200,7 +200,7 @@ def test_llm_fails_uses_template_fallback():
     _reset_notified()
     _cache.clear()
     m1, m2 = _market_with_prob(500), _market_with_prob(650)
-    fetcher = AsyncMock(side_effect=[(m1, None), (m2, None)])
+    fetcher = AsyncMock(side_effect=[m1, m2])
     gen = AsyncMock(side_effect=RuntimeError("OpenRouter down"))
     with patch("watcher.core.send_notification") as ms:
         _poll(fetcher=fetcher, generate_narrative=gen)

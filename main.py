@@ -17,7 +17,7 @@ import math
 import re
 import time
 from contextlib import asynccontextmanager
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 
 import httpx
@@ -69,23 +69,31 @@ KXWCGAME_SERIES = "KXWCGAME"
 # to absorb minor delays. Wider would guess; narrower misses imminent kickoffs.
 KICKOFF_GRACE = timedelta(minutes=30)
 
-MONTHS = {
-    "JAN": 1,
-    "FEB": 2,
-    "MAR": 3,
-    "APR": 4,
-    "MAY": 5,
-    "JUN": 6,
-    "JUL": 7,
-    "AUG": 8,
-    "SEP": 9,
-    "OCT": 10,
-    "NOV": 11,
-    "DEC": 12,
-}
+# Knockout-phase priority: ADVANCE first ("to advance" — including ET/penalties,
+# the fan-meaningful probability), KXWCGAME fallback (regulation-time only).
+KXWCADVANCE_SERIES = "KXWCADVANCE"
+_MATCH_SERIES_PRIORITY = (KXWCADVANCE_SERIES, KXWCGAME_SERIES)
+
+# Cache open markets per series. Shared across all watcher teams per cycle
+# so the 48-teams fan-out collapses to 1 fetch per 30s per series.
+_open_markets_cache: dict[str, tuple[float, list]] = {}
+_OPEN_MARKETS_CACHE_TTL = 30.0
 
 
-# --- Tournament-winner market (scaffolded) ----------------------------------
+async def _get_open_markets(series: str) -> list:
+    """Return /markets?series_ticker={series}&status=open, cached 30s.
+
+    Kalshi filters past settled fixtures server-side via status=open, so the
+    bidirectional-abs() past-matches bug is structurally impossible here.
+    """
+    now = time.monotonic()
+    entry = _open_markets_cache.get(series)
+    if entry is not None and (now - entry[0]) < _OPEN_MARKETS_CACHE_TTL:
+        return entry[1]
+    resp = await _fetch_json("markets", {"series_ticker": series, "status": "open"})
+    markets = resp.get("markets", [])
+    _open_markets_cache[series] = (now, markets)
+    return markets
 
 
 async def fetch_tournament_winner_market(tw: str) -> dict | None:
@@ -103,169 +111,62 @@ async def fetch_tournament_winner_market(tw: str) -> dict | None:
         raise
 
 
-# --- Per-match market (ENGINEER TYPES THIS) ---------------------------------
+# --- Per-match market (rewritten Jun 30) ------------------------------------
 
-# Events list cache: all 48 teams share the same KXWCGAME events response.
-# Without this, the watcher's 48 per-cycle calls to fetch_per_match_market each
-# hit /events independently -> 48 identical calls per cycle -> 429 rate limit.
-# 30s TTL matches CACHE_TTL_SECONDS; the events list changes slowly (matches
-# are added days ahead, not second-to-second).
-_events_cache: tuple[float, list] | None = None
-_EVENTS_CACHE_TTL = 30.0
+# Uses /markets?series_ticker={series}&status=open directly — Kalshi filters
+# past settled fixtures server-side, so the bidirectional-abs() past-matches
+# bug is structurally impossible. Minute-precision occurrence_datetime from
+# the market object replaces ticker-string date parsing. ADVANCE series first
+# (knockout-phase fans care about progression), KXWCGAME fallback (group stage).
 
 
-async def _get_events() -> list:
-    """Return the KXWCGAME events list, cached for _EVENTS_CACHE_TTL seconds.
+async def fetch_per_match_market(pm: str) -> dict | None:
+    """Find the team's current or next-match open market. Return the market dict.
 
-    A failed fetch does NOT update the cache (next call retries immediately).
-    Re-raises on HTTP error — caller (fetch_per_match_market) handles.
+    Tries KXWCADVANCE first (knockout — advance probability including ET/penalties,
+    what fans actually mean), then KXWCGAME (regulation-time only, covers group
+    stage). The preference order is product-aware: in knockout rounds the
+    KXWCGAME market shows ~96% tie / 1–2% per side, while KXWCADVANCE shows
+    the real ~50% advance probability.
+
+    Within each series, picks the market with the nearest occurrence_datetime
+    and whose ticker ends with "-{pm}" (team's 3-letter per-match code).
+    Returns None if no open market found; caller (fetch_market_for_team) falls
+    back to tournament-winner per D15.
     """
-    global _events_cache
-    now = time.monotonic()
-    if _events_cache is not None and (now - _events_cache[0]) < _EVENTS_CACHE_TTL:
-        return _events_cache[1]
-    resp = await _fetch_json("events", {"series_ticker": KXWCGAME_SERIES})
-    events = resp.get("events", [])
-    _events_cache = (now, events)
-    return events
-
-
-# Markets-per-event cache: multiple teams share the same match event (e.g.
-# croatia and ghana both query KXWCGAME-26JUN27CROGHA). Without this cache, the
-# watcher makes ~48 /markets calls per cycle even though many are duplicates.
-# With it, unique events are fetched once per 30s. Re-raises on HTTP error.
-_markets_cache: dict[str, tuple[float, list]] = {}
-_MARKETS_CACHE_TTL = 30.0
-
-
-async def _get_markets_for_event(event_ticker: str) -> list:
-    """Return the markets list for an event, cached per event_ticker for 30s."""
-    now = time.monotonic()
-    entry = _markets_cache.get(event_ticker)
-    if entry is not None and (now - entry[0]) < _MARKETS_CACHE_TTL:
-        return entry[1]
-    resp = await _fetch_json("markets", {"event_ticker": event_ticker})
-    markets = resp.get("markets", [])
-    _markets_cache[event_ticker] = (now, markets)
-    return markets
-
-
-async def fetch_per_match_market(pm: str) -> tuple[dict, date] | None:
-    """Search KXWCGAME events for the team's nearest match. Return (market, match_date).
-
-    The parsed match_date is threaded back so extract_market_fields can label
-    scheduled vs ongoing vs closed — Kalshi's 'active' status alone can't (D26).
-    Previously match_date was computed for selection then discarded (the `_`).
-
-    Uses _get_events() (cached 30s) instead of hitting /events fresh every call.
-    The watcher polls 48 teams per cycle — without the cache that's 48 identical
-    /events calls, which trips Kalshi's rate limit (429). With the cache it's 1.
-
-    Steps:
-      1. GET /events?series_ticker=KXWCGAME  ->  {"events": [...]}  (cached 30s)
-      2. Filter for events whose event_ticker contains pm
-         (e.g. "BRA" in "KXWCGAME-26JUN24SCOBRA")
-      3. Parse the date from each matching ticker:
-         ticker[9:16] = "26JUN24" -> year=2026, month=6, day=24
-         Use the MONTHS dict above. Build a date() for each.
-      4. Pick the match nearest to today: min(abs(match_date - date.today()))
-      5. GET /markets?event_ticker={that event's ticker}  ->  {"markets": [...]}
-      6. Return (market, match_date) for the ticker ending "-{pm}"  (NOT -TIE)
-
-    Return None if no matching event or market found.
-    Re-raise on HTTP errors (timeout, 500) — caller handles.
-    """
-    events = await _get_events()
-
-    # Filter for events whose event_ticker contains the team's pm code.
-    # Substring match — works because the 3-letter FIFA codes don't collide
-    # with each other within a ticker (verified across the live KXWCGAME set).
-    matches = [e for e in events if pm in e.get("event_ticker", "")]
-    if not matches:
-        return None
-
-    # Track the closest match via (event_ticker, match_date); replace when
-    # a candidate is nearer to today. Manual tracking (not min()+lambda) so
-    # the comparison is visible and explainable in review.
-    today = date.today()
-    closest: tuple[str, date] | None = None
-    for e in matches:
-        ticker = e["event_ticker"]
-        date_str = ticker[9:16]  # "26JUN24" — verified against live tickers
-        year = 2000 + int(date_str[0:2])
-        month = MONTHS[date_str[2:5]]
-        day = int(date_str[5:7])
-        match_date = date(year, month, day)
-        if closest is None or abs(match_date - today) < abs(closest[1] - today):
-            closest = (ticker, match_date)
-
-    # Fetch markets for the chosen event, return the team's market (not -TIE).
-    # Return (market, match_date) — the date labels match_status downstream (D26).
-    if closest is None:
-        return None
-    chosen_ticker, chosen_date = closest
-
-    # Knockout-stage check: KXWCADVANCE series ("to advance" including ET/penalties)
-    # may exist for the same fixture. It's more meaningful than KXWCGAME (regulation
-    # time only) in knockout rounds — the latter shows ~1-2% per side when a tie is
-    # ~96%, while KXWCADVANCE shows the real ~50% advance probability.
-    # We construct the ticker by replacing the series prefix and fetch directly.
-    advance_event = chosen_ticker.replace("KXWCGAME-", "KXWCADVANCE-")
-    advance_market_ticker = f"{advance_event}-{pm}"
-    try:
-        resp = await _fetch_json(f"markets/{advance_market_ticker}")
-        advance_market = resp.get("market")
-        if advance_market is not None:
-            return advance_market, chosen_date
-    except httpx.HTTPStatusError as e:
-        if e.response.status_code != 404:
-            raise
-        # 404 = no KXWCADVANCE market for this fixture (group stage), fall through
-
-    # Fall back to KXWCGAME (regulation-time only).
-    markets = await _get_markets_for_event(chosen_ticker)
     suffix = f"-{pm}"
-    for m in markets:
-        if m.get("ticker", "").endswith(suffix):
-            return m, chosen_date
+    now_utc = datetime.now(timezone.utc)
+    for series in _MATCH_SERIES_PRIORITY:
+        markets = await _get_open_markets(series)
+        candidates = []
+        for m in markets:
+            ticker = m.get("ticker", "")
+            if not ticker.endswith(suffix):
+                continue
+            k = _parse_utc_dt(m.get("occurrence_datetime"))
+            if k is None:
+                continue  # garbage kickoff — can't rank, skip
+            candidates.append((abs((k - now_utc).total_seconds()), m))
+        if candidates:
+            return min(candidates, key=lambda t: t[0])[1]
     return None
 
 
 # --- Orchestrator (ENGINEER TYPES THIS) -------------------------------------
 
 
-async def fetch_market_for_team(team: str) -> tuple[dict, date | None] | None:
-    """Given a team name (e.g. "brazil"), return (market, match_date) or None.
+async def fetch_market_for_team(team: str) -> dict | None:
+    """Given a team name (e.g. "brazil"), return the market dict or None.
 
-    match_date is the parsed date of the chosen per-match event (D26), or None
-    for the tournament-winner fallback (no single match date). Threading it lets
-    extract_market_fields label scheduled vs ongoing vs closed — Kalshi's
-    'active' status alone can't (D26).
-
-    Steps:
-      1. Look up team via get_team(team)  ->  {"tw": ..., "pm": ...}  or None
-      2. Try fetch_per_match_market(pm) first  ->  (market, match_date) or None
-      3. If None, fall back to fetch_tournament_winner_market(tw) -> (market, None)
-      4. Return (market, match_date), or None if no market at all
-
-    If get_team returns None (unknown team), return None.
-    Raises on network error — the endpoint (Component 6) catches and
-    returns a 200 with degraded narrative (D17).
+    Per-match first (most relevant); tournament-winner fallback (D15).
     """
     codes = get_team(team)
     if codes is None:
         return None
-    # Per-match first (in-play is most relevant); fall back to tournament-winner.
-    # This is the D15 decision point. It used to be a one-line `or`; threading
-    # match_date as a tuple broke `or` (a tuple is truthy even holding Nones),
-    # so the fallback is now explicit. Tradeoff: one extra line for type-correctness.
-    pm_result = await fetch_per_match_market(codes["pm"])
-    if pm_result is not None:
-        return pm_result  # (market, match_date)
-    market = await fetch_tournament_winner_market(codes["tw"])
-    if market is None:
-        return None
-    return market, None  # tournament-winner has no single match date
+    pm_market = await fetch_per_match_market(codes["pm"])
+    if pm_market is not None:
+        return pm_market
+    return await fetch_tournament_winner_market(codes["tw"])
 
 
 # --- Data transforms (Component 3) ------------------------------------------
@@ -373,7 +274,6 @@ def _extract_opponent(
 
 def extract_market_fields(
     market: dict | None,
-    match_date: date | None = None,
     team_name: str | None = None,
 ) -> dict:
     """Pull structured fields from a raw Kalshi market object.
@@ -391,9 +291,9 @@ def extract_market_fields(
     KXWCGAME market) disambiguates: >30m before kickoff -> 'scheduled', within
     30m of/after kickoff -> 'ongoing', until status flips to a settled state. A
     settled status ('finalized'/'closed'/'settled') overrides time. When
-    `occurrence_datetime` is missing/garbage, falls back to the ticker-parsed
-    `match_date` (local matchday, day-granular) and finally to 'active' ->
-    'scheduled'. match_status is only set for per-match markets (opponent set).
+    `occurrence_datetime` is missing/garbage and no settled status, falls back
+    to 'active' -> 'scheduled'. match_status is only set for per-match markets
+    (opponent set).
     """
     if market is None:
         return {
@@ -434,17 +334,6 @@ def extract_market_fields(
                 # the market is live until settled, so "ongoing" is correct.
                 now = datetime.now(timezone.utc)
                 match_status = "scheduled" if now < kickoff - KICKOFF_GRACE else "ongoing"
-            elif match_date is not None:
-                # Fallback (D26): occurrence_datetime missing/garbage -> use the
-                # ticker-parsed local matchday. Day-granular; can't cross UTC date
-                # boundaries. Kept because some markets may lack occurrence_datetime.
-                today = date.today()
-                if match_date > today:
-                    match_status = "scheduled"
-                elif match_date == today:
-                    match_status = "ongoing"
-                else:
-                    match_status = "closed"
             elif status == "active":
                 match_status = "scheduled"
             else:
@@ -758,21 +647,15 @@ async def get_team_sentiment(team_name: str) -> TeamSentiment:
     display_name = team_key.replace("_", " ").title()
 
     # 2. Fetch market (30s cache). ANY error -> degrade to None (D17).
-    #    Returns (market, match_date); match_date labels match_status (D26).
     fetch_failed = False
-    match_date: date | None = None
     try:
-        fetched = await _get_cached_or_fetch(team_key, fetch_market_for_team)
-        if fetched is not None:
-            market, match_date = fetched
-        else:
-            market = None
+        market = await _get_cached_or_fetch(team_key, fetch_market_for_team)
     except Exception:
         fetch_failed = True
         market = None
 
     # 3. Extract structured fields (pure, never raises). current_prob is in bp.
-    fields = extract_market_fields(market, match_date, display_name)
+    fields = extract_market_fields(market, display_name)
 
     # 4. Update rolling window + compute delta (bp internally, D27).
     now = time.monotonic()

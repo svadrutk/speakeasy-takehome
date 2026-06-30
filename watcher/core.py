@@ -17,7 +17,6 @@ from __future__ import annotations
 import asyncio
 import subprocess
 import time
-from datetime import date
 from typing import Awaitable, Callable, Optional
 
 from config import (
@@ -31,7 +30,7 @@ from config import (
 # Shared state (imported by main.py for endpoint delta computation)
 _WINDOW_MAX_AGE: float = 120.0
 _rolling: dict[str, list[tuple[float, int]]] = {}
-_cache: dict[str, tuple[float, tuple[dict, date | None] | None]] = {}
+_cache: dict[str, tuple[float, dict | None]] = {}
 _last_notified: dict[str, float] = {}
 
 
@@ -73,8 +72,8 @@ def _record_sample(team_key: str, prob_bp: int | None, now: float) -> None:
 
 async def _get_cached_or_fetch(
     team_key: str,
-    fetcher: Callable[[str], Awaitable[tuple[dict, date | None] | None]],
-) -> tuple[dict, date | None] | None:
+    fetcher: Callable[[str], Awaitable[dict | None]],
+) -> dict | None:
     now = time.monotonic()
     entry = _cache.get(team_key)
     if entry is not None and (now - entry[0]) < CACHE_TTL_SECONDS:
@@ -90,8 +89,8 @@ TraceFn = Callable[[str], None]
 async def _poll_team(
     team_key: str,
     *,
-    fetcher: Callable[[str], Awaitable[tuple[dict, date | None] | None]],
-    extract_fields: Callable[[dict | None, Optional[date], Optional[str]], dict],
+    fetcher: Callable[[str], Awaitable[dict | None]],
+    extract_fields: Callable[[dict | None, Optional[str]], dict],
     generate_narrative: Callable[[dict], Awaitable[str]],
     verify_narrative: Callable[[str, dict], bool],
     template_narrative: Callable[[dict], str],
@@ -108,16 +107,15 @@ async def _poll_team(
         previous_bp = window[-1][1] if window else None
 
         if use_cache:
-            fetched = await _get_cached_or_fetch(team_key, fetcher)
+            market = await _get_cached_or_fetch(team_key, fetcher)
         else:
-            fetched = await fetcher(team_key)
-        if fetched is None:
+            market = await fetcher(team_key)
+        if market is None:
             if trace:
                 trace(f"{team_key}: no market -> skip")
             return
-        market, match_date = fetched
         display_name = team_key.replace("_", " ").title()
-        fields = extract_fields(market, match_date, display_name)
+        fields = extract_fields(market, display_name)
         current_bp = fields["current_prob"]
         now = time.monotonic()
         _record_sample(team_key, current_bp, now)
@@ -181,8 +179,8 @@ async def _poll_team(
 
 async def _watcher_loop(
     *,
-    fetcher: Callable[[str], Awaitable[tuple[dict, date | None] | None]],
-    extract_fields: Callable[[dict | None, Optional[date], Optional[str]], dict],
+    fetcher: Callable[[str], Awaitable[dict | None]],
+    extract_fields: Callable[[dict | None, Optional[str]], dict],
     generate_narrative: Callable[[dict], Awaitable[str]],
     verify_narrative: Callable[[str, dict], bool],
     template_narrative: Callable[[dict], str],

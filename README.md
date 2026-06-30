@@ -21,7 +21,7 @@ flowchart LR
     %% Shared LLM Pipeline
     subgraph LLM ["LLM Pipeline (shared: generate_narrative → verify → template fallback)"]
         direction LR
-        XForm["Build Display\n(bps, delta, volume)"]
+        XForm["Build Display\n(bp, delta, volume)"]
         Gen["LLM Inference\n(generate_narrative)"]
         Vfy{"Verify +\nTemplate Fallback"}
 
@@ -30,18 +30,16 @@ flowchart LR
     end
 
     %% Synchronous API Path
-    subgraph Service ["FastAPI Service (Sync)"]
+    subgraph Service ["FastAPI Service"]
         direction LR
         Req(["GET /team/{team}"])
-        EventsCache{"Events List\n(_events_cache, 30s)"}
-        MarketsCache{"Markets/Event\n(_markets_cache, 30s)"}
-        ResultCache{"Market Result\n(_cache, 30s)"}
+        TeamCache{"Per-Team Market\n(_cache, 30s)"}
+        SeriesCache{"Per-Series Open\n(_open_markets_cache, 30s)"}
         Out(["JSON 200 Response"])
 
-        Req --> ResultCache
-        EventsCache -.-> ResultCache
-        MarketsCache -.-> ResultCache
-        ResultCache --> XForm
+        Req --> TeamCache
+        SeriesCache -.-> TeamCache
+        TeamCache --> XForm
         Vfy --> Out
     end
 
@@ -58,9 +56,7 @@ flowchart LR
     end
 
     %% External feeds
-    Kalshi --> Poll
-    Kalshi -.-> EventsCache
-    Kalshi -.-> MarketsCache
+    Kalshi --> SeriesCache
     OpenRouter -.-> Gen
 
     %% Shared State
@@ -72,15 +68,15 @@ flowchart LR
 - Kalshi public REST API call needs no auth 
 - Watcher shares rolling 2m window with API endpoint 
 - LLM is a final transform, never a decision-maker 
-- Opponent extracted from the event ticker (3-letter FIFA codes), not Kalshi's `yes_sub_title` which changes format without notice 
+- Opponent extracted from market title (" vs " split), not from `yes_sub_title` which changes format 
 
 ## Tradeoffs
 - Deterministic gate vs LLM-judge: Notifications trigger via strict math (relative delta threshold). The LLM only writes the prose. Ensures testability and prevents hallucinated spam or silent failures.
 - Graceful degradation (Always `200 OK`): Kalshi or LLM outages return null data fields with a fallback template narrative. Clients don't crash; developers/fans always get a readable status.
 - REST polling vs WebSockets: Used Kalshi's public `REST API` instead of WebSockets. Public `REST` requires zero auth. At our scale (watching 3-5 teams), polling is highly viable and debuggable.
 - Integer basis points: All internal probability math uses integers (`5% = 500bp`). Floats only appear at the final `JSON` boundary. Prevents floating-point precision drift. 
-- Events/markets caching: Three separate 30s caches (market results, events list, markets per event). The events cache prevents 48 identical `/events` calls per watcher cycle — without it, the 48-team poll hits Kalshi's rate limit. 
-- Knockout-stage advance markets: `fetch_per_match_market` checks the `KXWCADVANCE` series ("to advance" including extra time/penalties) before falling back to `KXWCGAME` (regulation time only). In knockout rounds the regulation-time markets show ~1-2% per side and ~96% tie, while the advance markets show the real ~50% probability fans expect. Construction is a simple series-prefix swap on the event ticker we already found.
+- Per-series open-markets caching: Two 30s caches: per-team market results (dedup concurrent curls) and per-series open-markets (`_open_markets_cache`). The series cache collapses the watcher's 48-teams fan-out into 1–2 `/markets?series_ticker={series}&status=open` calls per cycle. Kalshi's server-side `status=open` filter makes the bidirectional-abs() past-match bug structurally impossible — past settled fixtures never appear in the response.
+- Knockout-stage advance markets: `fetch_per_match_market` iterates `(KXWCADVANCE, KXWCGAME)` in priority order — ADVANCE ("to advance" including extra time/penalties) is queried as a full series first, not derived from a KXWCGAME fixture. In knockout rounds the regulation-time markets show ~1-2% per side and ~96% tie, while the advance markets show the real ~50% probability fans expect.
 
 ## To Improve
 - Server-Sent Events (`SSE`): Upgrade the polling endpoint to stream real-time JSON updates to clients.
