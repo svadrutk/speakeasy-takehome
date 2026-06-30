@@ -558,7 +558,7 @@ match is in play (tournament-winner odds don't move fast between matches), cache
 not at all when a match is live. Product-aware improvement.
 
 **Rejected:** No cache (wasteful, no caching story for review); library like `cachetools`
-(overkill for one cache, adds a dependency for ~15 lines of code we can explain).
+(overkill for two small caches, adds a dependency for ~15 lines of code we can explain).
 
 **Review answer:** "I use an in-memory dict with a 30-second TTL. Fresh enough for a casual
 fan, reduces Kalshi calls. With another week I'd make it conditional — cache aggressively
