@@ -70,6 +70,14 @@ TEAMS: dict[str, dict[str, str]] = {
     "uzbekistan": {"tw": "UZB", "pm": "UZB"},
 }
 
+# Reverse mapping: pm (per-match) 3-letter code -> display name.
+# Used by _extract_opponent to parse opponent from the ticker instead of the
+# fragile title string. Built from TEAMS (single source of truth).
+CODE_TO_NAME: dict[str, str] = {
+    v["pm"]: k.replace("_", " ").lower()
+    for k, v in TEAMS.items()
+}
+
 # --- Thresholds -------------------------------------------------------------
 DEFAULT_THRESHOLD: float = 0.20  # 20% relative delta -> notify (D5)
 INTER_TEAM_DELAY_SECONDS: float = 0.30

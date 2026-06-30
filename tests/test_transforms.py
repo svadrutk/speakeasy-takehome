@@ -151,7 +151,7 @@ def test_extract_market_fields_none_market():
 def test_extract_market_fields_per_match_happy_path():
     # Per-match: opponent from title, status active -> scheduled, all fields populated.
     result = extract_market_fields(_per_match_market())
-    assert result["opponent"] == "Scotland"
+    assert result["opponent"] == "scotland"
     assert result["match_status"] == "scheduled"
     assert result["market"] == "KXWCGAME-26JUN24SCOBRA-BRA"
     assert result["current_prob"] == 5300
@@ -198,21 +198,21 @@ def test_extract_market_fields_opponent_team_first_in_title():
     result = extract_market_fields(
         _per_match_market(title="Brazil vs Scotland Winner?", yes_sub_title="Brazil")
     )
-    assert result["opponent"] == "Scotland"
+    assert result["opponent"] == "scotland"
 
 
-def test_extract_market_fields_opponent_with_prefixed_yes_sub_title():
-    # Kalshi changed yes_sub_title to "Reg Time: Morocco" — the old substring
-    # match failed because the full string isn't in the title. Passing team_name
-    # (our known display name) bypasses yes_sub_title format entirely.
+def test_extract_market_fields_opponent_ticker_based():
+    # Opponent extracted from ticker, not title (structured 3-letter codes).
+    # Ticker suffix=MAR (our team=Morocco), middle 6 chars contain both codes.
     result = extract_market_fields(
         _per_match_market(
+            ticker="KXWCGAME-26JUN29NEDMAR-MAR",
             title="Netherlands vs Morocco Winner?",
             yes_sub_title="Reg Time: Morocco",
         ),
         team_name="Morocco",
     )
-    assert result["opponent"] == "Netherlands"
+    assert result["opponent"] == "netherlands"
     assert result["match_status"] == "scheduled"
 
 

@@ -24,6 +24,7 @@ import httpx
 from fastapi import FastAPI, HTTPException
 
 from config import (
+    CODE_TO_NAME,
     KALSHI_BASE_URL,
     LLM_MODEL,
     OPENROUTER_API_KEY,
@@ -306,38 +307,46 @@ def _extract_opponent(
     title: str | None,
     yes_sub_title: str | None,
     team_name: str | None = None,
+    *,
+    ticker: str | None = None,
 ) -> str | None:
-    """Parse opponent from a per-match market title.
+    """Parse opponent from a per-match market ticker or title.
 
-    Uses the known team_name when provided (Approach 3 — robust against
-    yes_sub_title format changes like "Reg Time: Morocco"). Falls back to
-    yes_sub_title substring matching when team_name is not provided.
+    Primary: extract both 3-letter team codes from the ticker suffix and
+    middle (e.g. KXWCADVANCE-26JUN29NEDMAR-NED -> opponent code MAR).
+    Look up display name via CODE_TO_NAME.
 
-    'Scotland vs Brazil Winner?' + team_name='Brazil' -> 'Scotland'.
+    Fallback: parse from title string (fragile, kept for unknown ticker
+    formats). 'Scotland vs Brazil Winner?' + team_name='Brazil' -> 'Scotland'.
     Tournament-winner titles have no ' vs ' -> None.
     """
+    if ticker:
+        parts = ticker.split("-")
+        if len(parts) == 3 and len(parts[1]) >= 13:
+            our_code = parts[2]
+            team_codes = parts[1][7:13]
+            code1 = team_codes[:3]
+            code2 = team_codes[3:6]
+            opp_code = code2 if code1 == our_code else (code1 if code2 == our_code else None)
+            if opp_code and opp_code in CODE_TO_NAME:
+                return CODE_TO_NAME[opp_code]
+
     if not title or " vs " not in title:
         return None
-    parts = title.split(" vs ")
-    if len(parts) != 2:
+    title_parts = title.split(" vs ")
+    if len(title_parts) != 2:
         return None
-
-    # Our team's side contains the team identifier; opponent is the other side.
-    # team_name is our preferred identifier (display name, e.g. "Morocco").
-    # It is passed from the caller (endpoint or watcher) who already knows
-    # which team we asked for, so it is independent of Kalshi's yes_sub_title
-    # format which changes without notice (e.g. "Reg Time: Morocco").
     identifier = team_name if team_name is not None else yes_sub_title
     if not identifier:
         return None
-    if identifier in parts[1]:
-        opponent_side = parts[0]
-    elif identifier in parts[0]:
-        opponent_side = parts[1]
+    if identifier in title_parts[1]:
+        opponent_side = title_parts[0]
+    elif identifier in title_parts[0]:
+        opponent_side = title_parts[1]
     else:
         return None
     words = opponent_side.split()
-    return words[0] if words else None
+    return words[0].rstrip(":") if words else None
 
 
 def extract_market_fields(
@@ -380,7 +389,7 @@ def extract_market_fields(
     yes_sub = market.get("yes_sub_title")
     status = market.get("status", "")
 
-    opponent = _extract_opponent(title, yes_sub, team_name)
+    opponent = _extract_opponent(title, yes_sub, team_name, ticker=ticker)
 
     # Match status: only meaningful for per-match markets (opponent is not None).
     if opponent is not None:
