@@ -254,8 +254,8 @@ def test_match_status_occurrence_far_future_is_scheduled():
 
 
 def test_match_status_occurrence_just_outside_grace_is_scheduled():
-    # Kickoff 31m out -> just past the 30m grace boundary -> scheduled.
-    occ = _now_utc() + timedelta(minutes=31)
+    # Kickoff 31m out (after Kalshi 3h correction) -> just past the 30m grace boundary -> scheduled.
+    occ = _now_utc() + timedelta(hours=3, minutes=31)
     result = extract_market_fields(_per_match_market(occurrence_datetime=occ.isoformat()))
     assert result["match_status"] == "scheduled"
 

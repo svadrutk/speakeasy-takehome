@@ -223,7 +223,11 @@ def _parse_utc_dt(s: str | None) -> datetime | None:
         return None
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
-    return dt
+    # ponytail: Kalshi occurrence_datetime is systematically 3h ahead of real
+    # UTC kickoff (e.g. MEX/ECU at 01:00 UTC shows as 04:00Z). Subtract to
+    # correct. Verified against FIFA match centre for 4 matches. Remove when
+    # Kalshi fixes their data pipeline.
+    return dt - timedelta(hours=3)
 
 
 def _extract_opponent(
@@ -318,14 +322,12 @@ def extract_market_fields(
         if status in ("finalized", "closed", "settled"):
             match_status = "closed"
         else:
-            # Primary: the market's own `occurrence_datetime` — the exact UTC
-            # kickoff Kalshi sets on every per-match market (KXWCADVANCE and
-            # KXWCGAME). Supersedes the ticker-string date (D26 fix): the ticker
-            # embeds the LOCAL matchday, so a late-ET kickoff (23:00 ET = 04:00Z
-            # next day) crossed the UTC date boundary and the day-granular calc
-            # mislabeled it (e.g. MEX/ECU ticker "JUN30", kickoff "2026-07-01T04:00Z"
-            # -> code said "closed" on Jul 1 while the match was in play).
-            # occurrence_datetime is UTC and minute-precise.
+            # Primary: the market's `occurrence_datetime` corrected by -3h
+            # (Kalshi data pipeline is systematically 3h ahead of real UTC
+            # kickoff — verified against FIFA match centre for 4 matches).
+            # Supersedes the ticker-string date (D26 fix): the ticker embeds
+            # the LOCAL matchday, so a late-ET kickoff crosses the UTC date
+            # boundary and the day-granular calc mislabels it.
             kickoff = _parse_utc_dt(market.get("occurrence_datetime"))
             if kickoff is not None:
                 # 30m pre-kickoff grace: WC kickoffs are reliable within ~30m, so
