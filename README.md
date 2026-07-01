@@ -68,7 +68,7 @@ flowchart LR
 - Kalshi public REST API call needs no auth 
 - Watcher shares rolling 2m window with API endpoint 
 - LLM is a final transform, never a decision-maker 
-- Opponent extracted from market title (" vs " split), not from `yes_sub_title` which changes format 
+- Opponent extracted from ticker string (both 3-letter codes in the raw ticker — structured, format-independent), with market title (" vs " split) as fallback; avoids fragile `yes_sub_title` parsing 
 
 ## Tradeoffs
 - Deterministic gate vs LLM-judge: Notifications trigger via strict math (relative delta threshold). The LLM only writes the prose. Ensures testability and prevents hallucinated spam or silent failures.
