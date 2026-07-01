@@ -72,11 +72,10 @@ flowchart LR
 
 ## Tradeoffs
 - Deterministic gate vs LLM-judge: Notifications trigger via strict math (relative delta threshold). The LLM only writes the prose. Ensures testability and prevents hallucinated spam or silent failures.
-- Graceful degradation (Always `200 OK`): Kalshi or LLM outages return null data fields with a fallback template narrative. Clients don't crash; developers/fans always get a readable status.
+- Graceful degradation (Always `200 OK`) vs raising errors: Kalshi or LLM outages return null data fields with a fallback template narrative. Clients don't crash; developers/fans always get a readable status.
 - REST polling vs WebSockets: Used Kalshi's public `REST API` instead of WebSockets. Public `REST` requires zero auth. At our scale (watching 3-5 teams), polling is highly viable and debuggable.
-- Integer basis points: All internal probability math uses integers (`5% = 500bp`). Floats only appear at the final `JSON` boundary. Prevents floating-point precision drift. 
-- Per-series open-markets caching: Two 30s caches: per-team market results (dedup concurrent curls) and per-series open-markets (`_open_markets_cache`). The series cache collapses the watcher's 48-teams fan-out into 1–2 `/markets?series_ticker={series}&status=open` calls per cycle. Kalshi's server-side `status=open` filter makes the bidirectional-abs() past-match bug structurally impossible — past settled fixtures never appear in the response.
-- Knockout-stage advance markets: `fetch_per_match_market` iterates `(KXWCADVANCE, KXWCGAME)` in priority order — ADVANCE ("to advance" including extra time/penalties) is queried as a full series first, not derived from a KXWCGAME fixture. In knockout rounds the regulation-time markets show ~1-2% per side and ~96% tie, while the advance markets show the real ~50% probability fans expect.
+- Integer basis points vs Floats: All internal probability math uses integers (`5% = 500bp`). Floats only appear at the final `JSON` boundary. Prevents floating-point precision drift, but requires a conversion at the final JSON boundary. 
+- Single file vs. Modules: Easier to scroll through in a code review -- scope of project is too small for modular files, but harder to maintain. 
 
 ## To Improve
 - Server-Sent Events (`SSE`): Upgrade the polling endpoint to stream real-time JSON updates to clients.

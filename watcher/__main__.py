@@ -40,7 +40,7 @@ def main_cli() -> None:
                 generate_narrative=main.generate_narrative,
                 verify_narrative=main.verify_narrative,
                 template_narrative=main.template_narrative,
-                trace=None,
+                trace=_trace,
             )
         )
 
